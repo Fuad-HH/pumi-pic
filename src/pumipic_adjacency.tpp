@@ -624,7 +624,8 @@ namespace pumipic {
     static_assert(
         std::is_invocable_r_v<
             void, func_t, o::Mesh &, ParticleStructure<ParticleType> *,
-            o::Write<o::LO> &, o::Write<o::LO> &, o::Write<o::Real> &>,
+            o::Write<o::LO> &, o::Write<o::LO> &, o::Write<o::LO> &,
+            o::Write<o::Real> &, o::Write<o::LO> &>,
         "Functional must accept a mesh and the particle structure\n");
 
     //Initialize timer
@@ -683,54 +684,44 @@ namespace pumipic {
       }
     };
     parallel_for(ptcls, finishUnmoved, "search_finishUnmoved");
-    
-    if (requireIntersection) {
-      //Setup intersection arrays
-      if (inter_points.size() == 0 || inter_faces.size() == 0) {
-        inter_points = o::Write<o::Real>(dim*ptcls->capacity(), 0);
-        inter_faces = o::Write<o::LO>(ptcls->capacity(), -1);
-      }
-      else {
-        auto initializeIntersection = PS_LAMBDA(const int& e, const int& pid, const int& mask) {
-          for (int i = 0; i < dim; ++i)
-            inter_points[dim * pid + i] = 0;
-          inter_faces[pid] = -1;
-        };
-        parallel_for(ptcls, initializeIntersection, "search_initializeIntersection");
-      }
-   }
+
+    // Setup intersection arrays
+    if (inter_points.size() == 0 || inter_faces.size() == 0) {
+      inter_points = o::Write<o::Real>(dim * ptcls->capacity(), 0);
+      inter_faces = o::Write<o::LO>(ptcls->capacity(), -1);
+    } else {
+      auto initializeIntersection =
+          PS_LAMBDA(const int &e, const int &pid, const int &mask) {
+        for (int i = 0; i < dim; ++i)
+          inter_points[dim * pid + i] = 0;
+        inter_faces[pid] = -1;
+      };
+      parallel_for(ptcls, initializeIntersection,
+                   "search_initializeIntersection");
+    }
 
     //Ensure all particles are within their starting element
     check_initial_parents(mesh, ptcls, x_ps_orig, pids, elem_ids, ptcl_done, elmArea, tol, false);
 
     bool found = false;
-    int loops = 0;
+    int loop_n = 0;
 
     //Iteratively find the next element until parent element is reached for each particle
     while (!found) {
       //Find intersection face
       find_exit_face(mesh, ptcls, x_ps_orig, x_ps_tgt, elem_ids, ptcl_done, elmArea, useBcc, lastExit, inter_points, tol);
-      //Check if intersection face is exposed
-      check_model_intersection(mesh, ptcls, x_ps_orig, x_ps_tgt, elem_ids, ptcl_done, lastExit, side_is_exposed,
-                               requireIntersection, inter_faces);
-      
-      //Move to next element
-      set_new_element(mesh, ptcls, elem_ids, ptcl_done, lastExit);
+      Func(mesh, ptcls, elem_ids, inter_faces, lastExit, inter_points, ptcl_done);
 
       //Check if all particles are found
       found = true;
       o::LOs ptcl_done_r(ptcl_done);
       auto minFlag = o::get_min(ptcl_done_r);
-      if(minFlag == 0)
+      if(minFlag == 0){
         found = false;
-      ++loops;
+      }
+      ++loop_n;
 
-      auto elem_ids_host = o::HostRead<o::LO>(elem_ids);
-      auto ptcl_done_host = o::HostRead<o::LO>(ptcl_done);
-      printf("PID %d and %d Elem id  %d and %d with loopid %d found %d and %d\n",
-              0, 1, elem_ids_host[0], elem_ids_host[1], loops, ptcl_done_host[0], ptcl_done_host[1]);
-
-      if(looplimit && loops >= looplimit) {
+      if(loop_n > looplimit) {
         Omega_h::Write<o::LO> numNotFound(1,0);
         auto ptclsNotFound = PS_LAMBDA(const int& e, const int& pid, const int& mask) {
           if( mask > 0 && !ptcl_done[pid] ) {
@@ -755,8 +746,6 @@ namespace pumipic {
       }
 
     }
-
-    Func(mesh, ptcls, elem_ids, inter_faces, inter_points);
 
     Kokkos::Profiling::popRegion();
     return found;

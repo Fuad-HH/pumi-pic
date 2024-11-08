@@ -7,6 +7,7 @@
 */
 
 #include "particle_structure.hpp"
+#include "ppMacros.h"
 #include "pumipic_adjacency.hpp"
 #include "pumipic_adjacency.tpp"
 #include "pumipic_kktypes.hpp"
@@ -18,6 +19,7 @@
 #include <Omega_h_defines.hpp>
 #include <Omega_h_for.hpp>
 #include <Omega_h_macros.h>
+#include <Omega_h_mark.hpp>
 #include <Omega_h_mesh.hpp>
 #include <particle_structs.hpp>
 #include <string>
@@ -36,14 +38,57 @@ typedef MemberTypes<Vector3d, Vector3d, int> Particle;
 typedef ps::ParticleStructure<Particle> PS;
 typedef Kokkos::DefaultExecutionSpace ExeSpace;
 
-void demo_func(o::Mesh &mesh, PS *ptcls, o::Write<o::LO> &elem_ids,
-               o::Write<o::LO> &inter_faces, o::Write<o::Real> &inter_points) {
-  printf("Running demo func. \n");
-  printf("Mesh has %d faces.\n", mesh.nfaces());
-  printf("Particle structure has %d capacity.\n", ptcls->capacity());
-  printf("Size of elem_ids = %d\n", elem_ids.size());
-  printf("Intersection face size = %d \n", inter_faces.size());
-  printf("Intersection points size = %d \n", inter_points.size());
+void apply_vacuum_boundary_condition(o::Mesh &mesh, PS *ptcls,
+                                  o::Write<o::LO>& elem_ids,
+                                  o::Write<o::LO>& ptcl_done,
+                                  o::Write<o::LO>& lastExit,
+                                  o::Write<o::LO>& xFace) {
+  const auto& side_is_exposed = o::mark_exposed_sides(&mesh);
+
+  auto checkExposedEdges = PS_LAMBDA(const int e, const int pid, const int mask){
+    if (mask > 0 && !ptcl_done[pid]) {
+      assert(lastExit[pid]!=-1);
+      const o::LO bridge = lastExit[pid];
+      const bool exposed = side_is_exposed[bridge];
+      ptcl_done[pid] = exposed;
+      xFace[pid] = lastExit[pid];
+      //elem_dis[pid] = exposed ? -1 : elem_ids[pid];
+    }
+  };
+  p::parallel_for(ptcls, checkExposedEdges, "apply vacumm boundary condition");
+}
+
+void move_to_new_element(o::Mesh &mesh, PS *ptcls, o::Write<o::LO>& elem_ids,
+                         o::Write<o::LO>& ptcl_done, o::Write<o::LO>& lastExit) {
+  const int dim = mesh.dim();
+  const auto& face2elems = mesh.ask_up(dim-1, dim);
+  const auto& face2elemElem = face2elems.ab2b;
+  const auto& face2elemOffset = face2elems.a2ab;
+
+  auto set_next_element = PS_LAMBDA(const int &e, const int &pid, const int &mask) {
+    if (mask > 0 && !ptcl_done[pid]) {
+      auto searchElm = elem_ids[pid];
+      auto bridge = lastExit[pid];
+      auto e2f_first = face2elemOffset[bridge];
+      auto e2f_last = face2elemOffset[bridge + 1];
+      auto upFaces = e2f_last - e2f_first;
+      assert(upFaces == 2);
+      auto faceA = face2elemElem[e2f_first];
+      auto faceB = face2elemElem[e2f_first + 1];
+      assert(faceA != faceB);
+      assert(faceA == searchElm || faceB == searchElm);
+      auto nextElm = (faceA == searchElm) ? faceB : faceA;
+      elem_ids[pid] = nextElm;
+    }
+  };
+  parallel_for(ptcls, set_next_element, "pumipic_set_next_element");
+}
+
+void handle_particle_at_elem_boundary(o::Mesh &mesh, PS *ptcls, o::Write<o::LO> &elem_ids,
+               o::Write<o::LO> &inter_faces, o::Write<o::LO> &lastExit, o::Write<o::Real> &inter_points,
+               o::Write<o::LO> &ptcl_done) {
+  apply_vacuum_boundary_condition(mesh, ptcls, elem_ids, ptcl_done, lastExit, inter_faces);
+  move_to_new_element(mesh, ptcls, elem_ids, ptcl_done, lastExit);
 }
 
 void printf_face_info(o::Mesh &mesh, o::LOs faceIds, bool all = false) {
@@ -92,7 +137,7 @@ bool is_inside3D(o::Mesh &mesh, o::LO elem_id, const o::Vector<3> point) {
   return bool(host_inside[0]);
 }
 
-bool test_search_mesh(const std::string mesh_fname, p::Library *lib, bool useBcc) {
+bool test_particle_search(const std::string mesh_fname, p::Library *lib, bool useBcc) {
   printf("Test: 3D intersection...\n");
   o::Library &olib = lib->omega_h_lib();
   // load mesh
@@ -211,7 +256,7 @@ bool test_search_mesh(const std::string mesh_fname, p::Library *lib, bool useBcc
   auto pids = ptcls->get<2>();
 
   p::particle_search(*p_mesh, ptcls, x_ps_d, x_ps_tgt, pids, elem_ids,
-                 lastExit, inter_points, 100, demo_func);
+                 lastExit, inter_points, 100, handle_particle_at_elem_boundary);
 
   auto elem_ids_host = o::HostRead<o::LO>(elem_ids);
   auto lastExit_host = o::HostRead<o::LO>(lastExit);
@@ -221,6 +266,9 @@ bool test_search_mesh(const std::string mesh_fname, p::Library *lib, bool useBcc
 
   if (!found_correct_dest_elem || !found_correct_dest_face){
     printf("[ERROR] Expected elements and faces are respectively [12, 6] and [28, 16] but found (%d, %d) and (%d, %d)\n",
+    elem_ids_host[0], elem_ids_host[1], lastExit_host[0], lastExit_host[1]);
+  } else {
+    printf("[PASSSED] Found Correct destination elements (%d %d) and faces (%d %d) for particle 0 and 1 respectively.\n",
     elem_ids_host[0], elem_ids_host[1], lastExit_host[0], lastExit_host[1]);
   }
 
@@ -239,7 +287,7 @@ int main(int argc, char **argv) {
 
   printf("\n\n-------------------- With BCC -------------------\n");
 
-  //bool passed_bcc = test_search_mesh(mesh_fname, &lib, true);
+  //bool passed_bcc = test_particle_search(mesh_fname, &lib, true);
   bool passed_bcc = true;
   //if (!passed_bcc) {
   //  printf("[ERROR]: Test failed **with** BCC.\n");
@@ -247,7 +295,7 @@ int main(int argc, char **argv) {
 
   printf("\n\n-------------------- Without BCC -------------------\n");
 
-  bool passed_woBcc = test_search_mesh(mesh_fname, &lib, false);
+  bool passed_woBcc = test_particle_search(mesh_fname, &lib, false);
   if (!passed_woBcc) {
     printf("[ERROR]: Test failed **without** BCC.\n");
   }
