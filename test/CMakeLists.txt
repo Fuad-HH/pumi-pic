@@ -27,6 +27,7 @@ make_test(test_find_exit_face_3D test_find_exit_face_3D.cpp)
 make_test(test_line_edge_2d test_line_edge_2d.cpp)
 make_test(test_moller_trumbore_intersect moller_trumbore_line_tri_test.cpp)
 make_test(test_search_mesh3d test_search_mesh.cpp)
+make_test(test_particle_search test_particle_search.cpp)
 include(testing.cmake)
 
 bob_end_subdir()

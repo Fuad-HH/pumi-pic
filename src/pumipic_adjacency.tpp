@@ -6,6 +6,7 @@
 #include "Omega_h_adj.hpp"
 #include "Omega_h_element.hpp"
 #include "Omega_h_shape.hpp"
+#include <type_traits>
 
 #include <particle_structs.hpp>
 
@@ -594,6 +595,151 @@ namespace pumipic {
     char buffer[1024];
     sprintf(buffer, "%d pumipic search_mesh loops %d", rank, loops);
     PrintAdditionalTimeInfo(buffer, 1);
+    Kokkos::Profiling::popRegion();
+    return found;
+  }
+
+  template <class ParticleType, typename Segment3d, typename SegmentInt, typename func_t>
+  bool particle_search(o::Mesh& mesh, ParticleStructure<ParticleType>* ptcls,
+                   Segment3d x_ps_orig, Segment3d x_ps_tgt, SegmentInt pids,
+                   o::Write<o::LO>& elem_ids,
+                   bool requireIntersection,
+                   o::Write<o::LO>& inter_faces,
+                   o::Write<o::Real>& inter_points,
+                   int looplimit,
+                   int debug,
+                   func_t Func) {
+    static_assert(std::is_invocable_r_v<void, func_t, o::Mesh&, ParticleStructure<ParticleType>* >,
+                  "Functional must accept a mesh and the particle structure\n");
+    Func(mesh, ptcls);
+    //Initialize timer
+    const auto btime = pumipic_prebarrier();
+    Kokkos::Profiling::pushRegion("pumipic_search_mesh");
+    Kokkos::Timer timer;
+
+    //Initial setup
+    const auto psCapacity = ptcls->capacity();
+    // True if particle has reached new parent element
+    o::Write<o::LO> ptcl_done(psCapacity, 0, "search_ptcl_done");
+    // Store the last exit face
+    o::Write<o::LO> lastExit(psCapacity,-1, "search_last_exit");
+    const auto elmArea = measure_elements_real(&mesh);
+    bool useBcc = !requireIntersection;
+    o::Real tol = compute_tolerance_from_area(elmArea);
+    
+    int rank;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    
+    const auto dim = mesh.dim();
+    const auto edges2faces = mesh.ask_up(dim-1, dim);
+    const auto side_is_exposed = mark_exposed_sides(&mesh);
+    const auto faces2verts = mesh.ask_elem_verts();
+    const auto coords = mesh.coords();
+    const auto edge_verts =  mesh.ask_verts_of(dim - 1);
+    
+    //Setup the output information
+    if (elem_ids.size() == 0) {
+      //Setup new parent id arrays
+      elem_ids = o::Write<o::LO>(psCapacity, -1, "search_elem_ids");
+      auto setInitial = PS_LAMBDA(const int e, const int pid, const int mask) {
+        if(mask) {
+          elem_ids[pid] = e;
+        }
+        else
+          ptcl_done[pid] = 1;
+      };
+      parallel_for(ptcls, setInitial, "search_setInitial");
+    }
+    else {
+      auto setInitial = PS_LAMBDA(const int e, const int pid, const int mask) {
+        if((mask && elem_ids[pid] == -1) || (!mask))
+          ptcl_done[pid] = 1;
+      };
+      parallel_for(ptcls, setInitial, "search_setInitial");
+    }
+
+    //Finish particles that didn't move
+    auto finishUnmoved = PS_LAMBDA(const int e, const int pid, const int mask) {
+      if  (mask){
+        const o::Vector<3> start = makeVector3(pid, x_ps_orig);
+        const o::Vector<3> end = makeVector3(pid, x_ps_tgt);
+        if (o::norm(end - start) < tol)
+          ptcl_done[pid] = 1;
+      }
+    };
+    parallel_for(ptcls, finishUnmoved, "search_finishUnmoved");
+    
+    if (requireIntersection) {
+      //Setup intersection arrays
+      if (inter_points.size() == 0 || inter_faces.size() == 0) {
+        inter_points = o::Write<o::Real>(dim*ptcls->capacity(), 0);
+        inter_faces = o::Write<o::LO>(ptcls->capacity(), -1);
+      }
+      else {
+        auto initializeIntersection = PS_LAMBDA(const int& e, const int& pid, const int& mask) {
+          for (int i = 0; i < dim; ++i)
+            inter_points[dim * pid + i] = 0;
+          inter_faces[pid] = -1;
+        };
+        parallel_for(ptcls, initializeIntersection, "search_initializeIntersection");
+      }
+   }
+
+    //Ensure all particles are within their starting element
+    check_initial_parents(mesh, ptcls, x_ps_orig, pids, elem_ids, ptcl_done, elmArea, tol, debug);
+
+    bool found = false;
+    int loops = 0;
+
+    //Iteratively find the next element until parent element is reached for each particle
+    while (!found) {
+      //Find intersection face
+      find_exit_face(mesh, ptcls, x_ps_orig, x_ps_tgt, elem_ids, ptcl_done, elmArea, useBcc, lastExit, inter_points, tol);
+      //Check if intersection face is exposed
+      check_model_intersection(mesh, ptcls, x_ps_orig, x_ps_tgt, elem_ids, ptcl_done, lastExit, side_is_exposed,
+                               requireIntersection, inter_faces);
+      
+      //Move to next element
+      set_new_element(mesh, ptcls, elem_ids, ptcl_done, lastExit);
+
+      //Check if all particles are found
+      found = true;
+      o::LOs ptcl_done_r(ptcl_done);
+      auto minFlag = o::get_min(ptcl_done_r);
+      if(minFlag == 0)
+        found = false;
+      ++loops;
+
+      auto elem_ids_host = o::HostRead<o::LO>(elem_ids);
+      auto ptcl_done_host = o::HostRead<o::LO>(ptcl_done);
+      printf("PID %d and %d Elem id  %d and %d with loopid %d found %d and %d\n",
+              0, 1, elem_ids_host[0], elem_ids_host[1], loops, ptcl_done_host[0], ptcl_done_host[1]);
+
+      if(looplimit && loops >= looplimit) {
+        Omega_h::Write<o::LO> numNotFound(1,0);
+        auto ptclsNotFound = PS_LAMBDA(const int& e, const int& pid, const int& mask) {
+          if( mask > 0 && !ptcl_done[pid] ) {
+            auto searchElm = elem_ids[pid];
+            auto ptcl = pids(pid);
+            const auto ptclDest = makeVector2(pid, x_ps_orig);
+            const auto ptclOrigin = makeVector2(pid, x_ps_tgt);
+            if (debug) {
+              printf("rank %d elm %d ptcl %d notFound %.15f %.15f to %.15f %.15f\n",
+                     rank, searchElm, ptcl, ptclOrigin[0], ptclOrigin[1],
+                     ptclDest[0], ptclDest[1]);
+            }
+            elem_ids[pid] = -1;
+            Kokkos::atomic_add(&(numNotFound[0]), 1);
+          }
+        };
+        ps::parallel_for(ptcls, ptclsNotFound, "ptclsNotFound");
+        Omega_h::HostWrite<o::LO> numNotFound_h(numNotFound);
+        fprintf(stderr, "ERROR:Rank %d: loop limit %d exceeded. %d particles were "
+                "not found. Deleting them...\n", rank, looplimit, numNotFound_h[0]);
+        break;
+      }
+
+    }
     Kokkos::Profiling::popRegion();
     return found;
   }
