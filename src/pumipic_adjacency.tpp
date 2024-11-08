@@ -151,12 +151,14 @@ namespace pumipic {
   OMEGA_H_DEVICE bool moller_trumbore_line_triangle(const o::Few<o::Vector<3>, 3>& faceVerts,
                                                     const o::Vector<3>& orig, const o::Vector<3>& dest,
                                                     o::Vector<3>& xpoint, const o::Real tol, const o::LO flip,
-                                                    o::Real& dproj, o::Real& closeness) {
+                                                    o::Real& dproj, o::Real& closeness, bool ray_as_segment=false) {
     const o::LO vtx1 = 2 - flip;
     const o::LO vtx2 = flip + 1;
     const o::Vector<3> edge1 = faceVerts[vtx1] - faceVerts[0];
     const o::Vector<3> edge2 = faceVerts[vtx2] - faceVerts[0];
-    const o::Vector<3> dir = o::normalize(dest - orig);
+    const o::Vector<3> displacement = dest-orig;
+    const o::Real seg_length = o::norm(displacement);
+    const o::Vector<3> dir = displacement/seg_length;
     const o::Vector<3> faceNorm = o::cross(edge2, edge1);
     const o::Vector<3> pvec = o::cross(dir, edge2);
     dproj = o::inner_product(dir, faceNorm);
@@ -170,7 +172,12 @@ namespace pumipic {
     const o::Real t = invdet * o::inner_product(edge2, qvec);
     xpoint = orig + dir * t;
     closeness = Kokkos::max(Kokkos::max(Kokkos::min(Kokkos::fabs(u), Kokkos::fabs(1 - u)), Kokkos::min(Kokkos::fabs(v), Kokkos::fabs(1 - v))), Kokkos::min(Kokkos::fabs(u + v), Kokkos::fabs(1 - u - v)));
-    return  (dproj >= tol) && (t >= -tol) && (u >= -tol) && (v >= -tol) && (u+v <= 1.0 + 2 * tol);
+    bool intersects = (dproj >= tol) && (t >= -tol) && (u >= -tol) && (v >= -tol) && (u+v <= 1.0 + 2 * tol);
+
+    if (ray_as_segment){
+      return intersects && (t <= seg_length+tol);
+    }
+    return intersects;
   }
 
   //Simple 2d line segment intersection routine
@@ -599,19 +606,27 @@ namespace pumipic {
     return found;
   }
 
+
+  /*
+  * //TODO List
+  *     - Which function parameters to remove
+  *     - Which function parameters to be used in the functor
+  *     - 
+  */
   template <class ParticleType, typename Segment3d, typename SegmentInt, typename func_t>
   bool particle_search(o::Mesh& mesh, ParticleStructure<ParticleType>* ptcls,
                    Segment3d x_ps_orig, Segment3d x_ps_tgt, SegmentInt pids,
                    o::Write<o::LO>& elem_ids,
-                   bool requireIntersection,
                    o::Write<o::LO>& inter_faces,
                    o::Write<o::Real>& inter_points,
                    int looplimit,
-                   int debug,
                    func_t Func) {
-    static_assert(std::is_invocable_r_v<void, func_t, o::Mesh&, ParticleStructure<ParticleType>* >,
-                  "Functional must accept a mesh and the particle structure\n");
-    Func(mesh, ptcls);
+    static_assert(
+        std::is_invocable_r_v<
+            void, func_t, o::Mesh &, ParticleStructure<ParticleType> *,
+            o::Write<o::LO> &, o::Write<o::LO> &, o::Write<o::Real> &>,
+        "Functional must accept a mesh and the particle structure\n");
+
     //Initialize timer
     const auto btime = pumipic_prebarrier();
     Kokkos::Profiling::pushRegion("pumipic_search_mesh");
@@ -619,11 +634,11 @@ namespace pumipic {
 
     //Initial setup
     const auto psCapacity = ptcls->capacity();
-    // True if particle has reached new parent element
     o::Write<o::LO> ptcl_done(psCapacity, 0, "search_ptcl_done");
-    // Store the last exit face
     o::Write<o::LO> lastExit(psCapacity,-1, "search_last_exit");
     const auto elmArea = measure_elements_real(&mesh);
+
+    bool requireIntersection = true;
     bool useBcc = !requireIntersection;
     o::Real tol = compute_tolerance_from_area(elmArea);
     
@@ -686,7 +701,7 @@ namespace pumipic {
    }
 
     //Ensure all particles are within their starting element
-    check_initial_parents(mesh, ptcls, x_ps_orig, pids, elem_ids, ptcl_done, elmArea, tol, debug);
+    check_initial_parents(mesh, ptcls, x_ps_orig, pids, elem_ids, ptcl_done, elmArea, tol, false);
 
     bool found = false;
     int loops = 0;
@@ -723,7 +738,7 @@ namespace pumipic {
             auto ptcl = pids(pid);
             const auto ptclDest = makeVector2(pid, x_ps_orig);
             const auto ptclOrigin = makeVector2(pid, x_ps_tgt);
-            if (debug) {
+            if (true) {
               printf("rank %d elm %d ptcl %d notFound %.15f %.15f to %.15f %.15f\n",
                      rank, searchElm, ptcl, ptclOrigin[0], ptclOrigin[1],
                      ptclDest[0], ptclDest[1]);
@@ -740,6 +755,9 @@ namespace pumipic {
       }
 
     }
+
+    Func(mesh, ptcls, elem_ids, inter_faces, inter_points);
+
     Kokkos::Profiling::popRegion();
     return found;
   }

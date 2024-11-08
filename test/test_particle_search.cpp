@@ -36,10 +36,14 @@ typedef MemberTypes<Vector3d, Vector3d, int> Particle;
 typedef ps::ParticleStructure<Particle> PS;
 typedef Kokkos::DefaultExecutionSpace ExeSpace;
 
-void demo_func(o::Mesh& mesh, PS* ptcls){
+void demo_func(o::Mesh &mesh, PS *ptcls, o::Write<o::LO> &elem_ids,
+               o::Write<o::LO> &inter_faces, o::Write<o::Real> &inter_points) {
   printf("Running demo func. \n");
   printf("Mesh has %d faces.\n", mesh.nfaces());
   printf("Particle structure has %d capacity.\n", ptcls->capacity());
+  printf("Size of elem_ids = %d\n", elem_ids.size());
+  printf("Intersection face size = %d \n", inter_faces.size());
+  printf("Intersection points size = %d \n", inter_points.size());
 }
 
 void printf_face_info(o::Mesh &mesh, o::LOs faceIds, bool all = false) {
@@ -206,8 +210,8 @@ bool test_search_mesh(const std::string mesh_fname, p::Library *lib, bool useBcc
   auto x_ps_tgt = ptcls->get<1>();
   auto pids = ptcls->get<2>();
 
-  p::particle_search(*p_mesh, ptcls, x_ps_d, x_ps_tgt, pids, elem_ids, !useBcc,
-                 lastExit, inter_points, 100, true, demo_func);
+  p::particle_search(*p_mesh, ptcls, x_ps_d, x_ps_tgt, pids, elem_ids,
+                 lastExit, inter_points, 100, demo_func);
 
   auto elem_ids_host = o::HostRead<o::LO>(elem_ids);
   auto lastExit_host = o::HostRead<o::LO>(lastExit);

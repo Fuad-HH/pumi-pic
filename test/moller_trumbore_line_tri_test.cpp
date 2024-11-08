@@ -78,6 +78,7 @@ void print_2D_mesh_edges(o::Mesh &mesh) {
 }
 
 bool moller_trumbore_line_tri_test(const std::string mesh_fname, o::Library *lib) {
+  printf("\n\n--------------------------------------------------------------------\n");
   printf("Test: moller_trumbore_line_tri from pumipic_adjacency.tpp ...\n");
   o::Mesh mesh = Omega_h::gmsh::read(mesh_fname, lib->self());
   printf("Mesh loaded successfully with %d elements\n", mesh.nelems());
@@ -188,6 +189,7 @@ bool moller_trumbore_line_tri_test(const std::string mesh_fname, o::Library *lib
 */
 bool moller_trumbore_extrapolated_intersection_test(const std::string mesh_fname, o::Library *lib, o::LO tet_id)
 {
+  printf("\n\n--------------------------------------------------------------------\n");
   printf("Test: moller_trumbore_line_tri test for element %d line extrapolation ...\n", tet_id);
   o::Mesh mesh = Omega_h::gmsh::read(mesh_fname, lib->self());
   printf("Mesh loaded successfully with %d elements\n", mesh.nelems());
@@ -308,6 +310,136 @@ bool moller_trumbore_extrapolated_intersection_test(const std::string mesh_fname
   return passed_intersections && passed_xpoints;
 }
 
+
+/*
+* Test the new flag of the function that takes the ray  as a line segment
+* meaning it only returns true if the intersection is inside the line segment.
+* It uses the same rays but oz doesn't intersect face 28 and all the others should
+* remain same.
+*/
+bool moller_trumbore_line_segment_extrapolated_intersection_test(
+    const std::string mesh_fname, o::Library *lib, o::LO tet_id) {
+  printf("\n\n--------------------------------------------------------------------\n");
+  printf("Test: moller_trumbore_line_tri test for element %d line segment ...\n", tet_id);
+  o::Mesh mesh = Omega_h::gmsh::read(mesh_fname, lib->self());
+  printf("Mesh loaded successfully with %d elements\n", mesh.nelems());
+  const auto elmArea = measure_elements_real(&mesh);
+  o::Real tol = pumipic::compute_tolerance_from_area(elmArea);
+  printf("[INFO] Planned tol is %.16f\n", tol);
+
+  const o::Vector<3> o{0.0, -0.2, -0.5};
+  const o::Vector<3> z{0.0, -0.2, 0.9};
+
+  printf("[INFO] o: %f %f %f\n", o[0], o[1], o[2]);
+  printf("[INFO] z: %f %f %f\n", z[0], z[1], z[2]);
+
+  if (!is_inside3D(mesh, 12, z)) {
+    printf("Error: z is not inside element 12.\n");
+    Kokkos::finalize();
+    exit(1);
+  }
+  if (!is_inside3D(mesh, 0, o)) {
+    printf("Error: o is not inside element 0.\n");
+    Kokkos::finalize();
+    exit(1);
+  }
+
+  // read adjacency data
+  const auto& coords = mesh.coords();
+  const auto& tet2tri = mesh.ask_down(o::REGION, o::FACE).ab2b;
+  const auto& tet2nodes = mesh.ask_verts_of(o::REGION);
+  const auto& face2nodes = mesh.ask_verts_of(o::FACE);
+  // save the intersections with all the tet faces
+  o::Write<o::Real> xpoints(4*3, 0.0, "xpoints xo, yo");
+  o::Write<o::LO> face_intersected(4, -1, "face_intersected");
+
+  auto get_intersections = OMEGA_H_LAMBDA(o::LO ray_id) {
+    const o::Few<o::LO, 4> tet_faces {tet2tri[4*tet_id], tet2tri[4*tet_id+1], tet2tri[4*tet_id+2], tet2tri[4*tet_id+3]};
+    printf("[INFO] Tet Faces are %d %d %d %d\n", tet_faces[0], tet_faces[1], tet_faces[2], tet_faces[3]);
+    const auto tet_nodes = o::gather_verts<4>(tet2nodes, tet_id);
+
+    for (int i = 0; i < 4; i++) {
+      o::LO face_id = tet_faces[i];
+      auto face_nodes = o::gather_verts<3>(face2nodes, face_id);
+      auto face_coords = o::gather_vectors<3, 3>(coords, face_nodes);
+
+      o::Vector<3> xpoint;
+      o::Real dprodj;
+      o::Real closeness;
+      o::LO flip = pumipic::isFaceFlipped(i, face_nodes, tet_nodes);
+
+      bool success = success = pumipic::moller_trumbore_line_triangle(
+          face_coords, o, z, xpoint, tol, flip, dprodj, closeness, true);
+
+      xpoints[i * 3 + 0] = xpoint[0];
+      xpoints[i * 3 + 1] = xpoint[1];
+      xpoints[i * 3 + 2] = xpoint[2];
+      face_intersected[i] = success;
+
+      printf("INFO: ray o->z %s face %d(%d,%d,%d) at point (%f, %f, "
+             "%f) with dprodj %f and closeness %f\n", (success) ? "intersected" : "did not intersect",
+             face_id, face_nodes[0], face_nodes[1], face_nodes[2], xpoint[0],
+             xpoint[1], xpoint[2], dprodj, closeness);
+
+    } // for faces
+  };
+  o::parallel_for(1, get_intersections, "get_intersections_run");
+
+  // * For element 3 : the faces are 58 53 54 56 and 58 and 54 intersects
+  // * For element 20: the faces are 39 37 38 54 and only 39   intersects
+  // * For element 12: the faces are 28 29 33 39 and **does not** intersect any face.
+  // ! It shows that even though the ray intersects face 39 when inside
+  // ! element 20, i.e. it enters element 12 through 39 but it doesn't 
+  // ! seem to intersect it when it's inside element 12.
+  o::Few<o::LO, 4> expected_intersects;
+  if (tet_id==3) {
+    expected_intersects = {1, 0, 1, 0};
+  } else if (tet_id==20){
+    expected_intersects = {1, 0, 0, 0};
+  } else if (tet_id==12) {
+    expected_intersects = {0, 0, 0, 0};
+  } else {
+    printf("[ERROR] Case not handled yet.\n");
+    Kokkos::finalize();
+    exit(1);
+  }
+
+  // * For face 58 or 54, z of intersection point = 0.8
+  // * For face 28(although it doesn't intersect), z of intersection point = 1.0
+  o::Real expected_xpoint_z;
+  if (tet_id==3){
+    expected_xpoint_z = 0.8;
+  } else if (tet_id==20){
+    expected_xpoint_z = 0.8;
+  } else if (tet_id==12){
+    expected_xpoint_z = 1.0;
+  } else {
+    printf("[ERROR] Case not handled yet.\n");
+    Kokkos::finalize();
+    exit(1);
+  }
+
+
+  auto face_intersected_host = o::HostRead<o::LO>(face_intersected);
+  auto xpoints_host = o::HostRead<o::Real>(xpoints);
+
+  bool passed_intersections = (face_intersected_host[0]==expected_intersects[0] && face_intersected_host[1]==expected_intersects[1] &&
+                               face_intersected_host[2]==expected_intersects[2] && face_intersected_host[3]==expected_intersects[3]);
+  bool passed_xpoints       = (Kokkos::abs(xpoints_host[2]-expected_xpoint_z) < tol);
+
+  if (!passed_intersections){
+    printf("[ERROR] It should intersect as %d %d %d %d but found %d %d %d %d\n",
+    expected_intersects[0], expected_intersects[1], expected_intersects[2], expected_intersects[3],
+    face_intersected_host[0], face_intersected_host[1], face_intersected_host[2], face_intersected_host[3]);
+  }
+
+  if (!passed_xpoints){
+    printf("[ERROR] It should intersect face at z = %f but intersected at %f\n", expected_xpoint_z, xpoints_host[2]);
+  }
+
+  return passed_intersections && passed_xpoints;
+}
+
 int main(int argc, char **argv) {
   o::Library lib(&argc, &argv);
   if (argc != 2) {
@@ -319,24 +451,32 @@ int main(int argc, char **argv) {
   bool extrapolated_intersection_test_case12 =
       moller_trumbore_extrapolated_intersection_test(mesh_fname, &lib, 12);
   if (!extrapolated_intersection_test_case12) {
-    printf("Extrapolated line intersection test failed for element 12. \n");
+    printf("[ERROR] Extrapolated line intersection test failed for element 12. \n");
   }
 
   bool extrapolated_intersection_test_case20 =
       moller_trumbore_extrapolated_intersection_test(mesh_fname, &lib, 20);
   if (!extrapolated_intersection_test_case20) {
-    printf("Extrapolated line intersection test failed for element 20. \n");
+    printf("[ERROR] Extrapolated line intersection test failed for element 20. \n");
   }
 
   bool extrapolated_intersection_test_case3 =
       moller_trumbore_extrapolated_intersection_test(mesh_fname, &lib, 3);
   if (!extrapolated_intersection_test_case3) {
-    printf("Extrapolated line intersection test failed for element 3. \n");
+    printf("[ERROR] Extrapolated line intersection test failed for element 3. \n");
+  }
+
+  bool line_segment_test_case = 
+      moller_trumbore_line_segment_extrapolated_intersection_test(mesh_fname, &lib, 12)&&
+      moller_trumbore_line_segment_extrapolated_intersection_test(mesh_fname, &lib, 3) &&
+      moller_trumbore_line_segment_extrapolated_intersection_test(mesh_fname, &lib, 20);
+  if (!line_segment_test_case){
+    printf("[ERROR] Line segment test failed.\n");
   }
 
   bool two_ray_test = moller_trumbore_line_tri_test(mesh_fname, &lib);
   if (!two_ray_test) {
-    printf("Test failed\n");
+    printf("[ERROR] Test failed\n");
   }
 
   int all_passed = (extrapolated_intersection_test_case12 &&
