@@ -337,7 +337,6 @@ namespace pumipic {
               if (success) {
                 lastExit[ptcl] = edge_id;
                 xPoints[2*ptcl] = xpts[0]; xPoints[2*ptcl+1] = xpts[1];
-                //printf("[fefInfo] Particle %d intersected with edge %d at (%f %f)\n", ptcl, edge_id, xpts[0], xpts[1]);
               }
             }
             ptcl_done[ptcl] = (lastExit[ptcl] == -1);
@@ -392,6 +391,64 @@ namespace pumipic {
         parallel_for(ptcls, findExitFace, "search_findExitFace_intersect_3d");
       }
     }
+  }
+
+  template <class ParticleType, typename Segment3d>
+  void
+  find_exit_face_3D_mt(o::Mesh mesh, ParticleStructure<ParticleType> *ptcls,
+                       Segment3d x_ps_orig, Segment3d x_ps_tgt,
+                       o::Write<o::LO> elem_ids, o::Write<o::LO> ptcl_done,
+                       o::Reals elmArea, bool useBcc, o::Write<o::LO> lastExit,
+                       o::Write<o::Real> xPoints, const o::Real &tol) {
+    const auto dim = mesh.dim();
+    if (dim != 3) {
+      printf("[ERROR] find_exit_face_3D_mt is only for 3D mesh but given a %d "
+             "mesh. Exiting... \n",
+             dim);
+    }
+    const auto elm2verts = mesh.ask_elem_verts();
+    const auto coords = mesh.coords();
+    const auto elm2faces = mesh.ask_down(dim, dim - 1);
+    const auto elmDown = elm2faces.ab2b;
+
+    const auto bridgeVerts = mesh.ask_verts_of(dim - 1);
+    auto findExitFace =
+        PS_LAMBDA(const lid_t, const lid_t ptcl, const bool mask) {
+      if (mask > 0 && !ptcl_done[ptcl]) {
+        const auto searchElm = elem_ids[ptcl];
+        OMEGA_H_CHECK(searchElm >= 0);
+        const auto tetv2v = o::gather_verts<4>(elm2verts, searchElm);
+        const auto tetCoords = o::gather_vectors<4, 3>(coords, tetv2v);
+        const auto dest = makeVector3(ptcl, x_ps_tgt);
+        const auto orig = makeVector3(ptcl, x_ps_orig);
+        const auto face_ids = o::gather_down<4>(elmDown, searchElm);
+        auto xpts = o::zero_vector<3>();
+        const o::LO prevExit = lastExit[ptcl];
+        lastExit[ptcl] = -1;
+        for (int fi = 0; fi < 4; ++fi) {
+          const auto face_id = face_ids[fi];
+          if (face_id == prevExit)
+            continue;
+          const auto fv2v = o::gather_verts<3>(bridgeVerts, face_id);
+          const auto face = o::gather_vectors<3, 3>(coords, fv2v);
+          const o::LO flip = isFaceFlipped(fi, fv2v, tetv2v);
+          o::Real dproj;
+          o::Real closeness;
+          const bool success = moller_trumbore_line_triangle(
+              face, orig, dest, xpts, tol, flip, dproj, closeness, true);
+          if (success) {
+            lastExit[ptcl] = face_id;
+            xPoints[3 * ptcl] = xpts[0];
+            xPoints[3 * ptcl + 1] = xpts[1];
+            xPoints[3 * ptcl + 2] = xpts[2];
+          }
+        } // for faces
+        // if particle doesn't intersect any face, it
+        // has reached the destination
+        ptcl_done[ptcl] = (lastExit[ptcl] == -1);
+      }
+    };
+    parallel_for(ptcls, findExitFace, "search_findExitFace_intersect_3d");
   }
 
   template <typename ParticleType, typename Segment3d>
@@ -647,11 +704,11 @@ namespace pumipic {
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     
     const auto dim = mesh.dim();
-    const auto edges2faces = mesh.ask_up(dim-1, dim);
-    const auto side_is_exposed = mark_exposed_sides(&mesh);
-    const auto faces2verts = mesh.ask_elem_verts();
-    const auto coords = mesh.coords();
-    const auto edge_verts =  mesh.ask_verts_of(dim - 1);
+    const auto& edges2faces = mesh.ask_up(dim-1, dim);
+    const auto& side_is_exposed = mark_exposed_sides(&mesh);
+    const auto& faces2verts = mesh.ask_elem_verts();
+    const auto& coords = mesh.coords();
+    const auto& edge_verts =  mesh.ask_verts_of(dim - 1);
     
     //Setup the output information
     if (elem_ids.size() == 0) {
@@ -708,8 +765,9 @@ namespace pumipic {
 
     //Iteratively find the next element until parent element is reached for each particle
     while (!found) {
-      //Find intersection face
-      find_exit_face(mesh, ptcls, x_ps_orig, x_ps_tgt, elem_ids, ptcl_done, elmArea, useBcc, lastExit, inter_points, tol);
+      find_exit_face_3D_mt(mesh, ptcls, x_ps_orig, x_ps_tgt, elem_ids,
+                           ptcl_done, elmArea, useBcc,
+                           lastExit, inter_points, tol);
       Func(mesh, ptcls, elem_ids, inter_faces, lastExit, inter_points, ptcl_done);
 
       //Check if all particles are found

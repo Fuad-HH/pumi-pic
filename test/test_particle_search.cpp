@@ -52,7 +52,7 @@ void apply_vacuum_boundary_condition(o::Mesh &mesh, PS *ptcls,
       const bool exposed = side_is_exposed[bridge];
       ptcl_done[pid] = exposed;
       xFace[pid] = lastExit[pid];
-      //elem_dis[pid] = exposed ? -1 : elem_ids[pid];
+      elem_ids[pid] = exposed ? -1 : elem_ids[pid];
     }
   };
   p::parallel_for(ptcls, checkExposedEdges, "apply vacumm boundary condition");
@@ -261,11 +261,11 @@ bool test_particle_search(const std::string mesh_fname, p::Library *lib, bool us
   auto elem_ids_host = o::HostRead<o::LO>(elem_ids);
   auto lastExit_host = o::HostRead<o::LO>(lastExit);
 
-  bool found_correct_dest_elem = elem_ids_host[0]==12 && elem_ids_host[1]==6;
-  bool found_correct_dest_face = lastExit_host[0]==28 && lastExit_host[1]==16;
+  bool found_correct_dest_elem = elem_ids_host[0]==12 && elem_ids_host[1]==-1;
+  bool found_correct_dest_face = lastExit_host[0]==39 && lastExit_host[1]==16;
 
   if (!found_correct_dest_elem || !found_correct_dest_face){
-    printf("[ERROR] Expected elements and faces are respectively [12, 6] and [28, 16] but found (%d, %d) and (%d, %d)\n",
+    printf("[ERROR] Expected elements and faces are respectively [12, -1(leak out)] and [39, 16] but found (%d, %d) and (%d, %d)\n",
     elem_ids_host[0], elem_ids_host[1], lastExit_host[0], lastExit_host[1]);
   } else {
     printf("[PASSSED] Found Correct destination elements (%d %d) and faces (%d %d) for particle 0 and 1 respectively.\n",
