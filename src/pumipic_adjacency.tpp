@@ -446,6 +446,11 @@ namespace pumipic {
         // if particle doesn't intersect any face, it
         // has reached the destination
         ptcl_done[ptcl] = (lastExit[ptcl] == -1);
+        if (lastExit[ptcl] == -1) { // to use in flux tally
+          xPoints[3 * ptcl + 0] = x_ps_tgt(ptcl, 0);
+          xPoints[3 * ptcl + 1] = x_ps_tgt(ptcl, 1);
+          xPoints[3 * ptcl + 2] = x_ps_tgt(ptcl, 2);
+        }
       }
     };
     parallel_for(ptcls, findExitFace, "search_findExitFace_intersect_3d");
@@ -677,7 +682,7 @@ namespace pumipic {
                    o::Write<o::LO>& inter_faces,
                    o::Write<o::Real>& inter_points,
                    int looplimit,
-                   func_t Func) {
+                   func_t& Func) {
     static_assert(
         std::is_invocable_r_v<
             void, func_t, o::Mesh &, ParticleStructure<ParticleType> *,
