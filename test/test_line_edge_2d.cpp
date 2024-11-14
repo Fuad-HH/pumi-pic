@@ -151,7 +151,7 @@ bool test_line_edge_2d(const std::string mesh_fname, o::Library *lib) {
       edge_id = 2;
       face_id = 1;
       printf("Testing y->o ray\n");
-    } else if (ray_id == 3) {
+    } else if (ray_id == 2) {
       edge_id = 6;
       face_id = 2;
       printf("Testing p->x ray\n");

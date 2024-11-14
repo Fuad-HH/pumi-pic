@@ -118,13 +118,14 @@ bool moller_trumbore_line_tri_test(const std::string mesh_fname, o::Library *lib
     const auto tet_nodes = o::gather_verts<4>(tet2nodes, tet_id);
     const auto origin = (ray_id == 0) ? x : y;
 
-    for (o::LO face_id : tet_faces) {
+    for (o::LO id = 0; id < tet_faces.size(); id ++) {
+      o::LO face_id = tet_faces[id];
       auto face_nodes = o::gather_verts<3>(face2nodes, face_id);
       auto face_coords = o::gather_vectors<3, 3>(coords, face_nodes);
       o::Vector<3> xpoint{0.0, 0.0, 0.0};
       o::Real dprodj = 0.0;
       o::Real closeness = 0.0;
-      o::LO flip = pumipic::isFaceFlipped(face_id, face_nodes, tet_nodes);
+      o::LO flip = pumipic::isFaceFlipped(id, face_nodes, tet_nodes);
       bool success = success = pumipic::moller_trumbore_line_triangle(
           face_coords, origin, o, xpoint, 1e-6, flip, dprodj, closeness);
       if (success) {
