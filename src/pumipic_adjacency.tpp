@@ -113,7 +113,7 @@ namespace pumipic {
         if( mask > 0 && !ptcl_done[pid] ) {
           auto searchElm = elem_ids[pid];
           auto ptcl = pids(pid);
-          OMEGA_H_CHECK(searchElm >= 0);
+          OMEGA_H_CHECK_PRINTF(searchElm >= 0, "Error: Particle cannot be in %d.\n", searchElm);
           auto elmVerts = o::gather_verts<4>(elm2verts, searchElm);
           const auto elmCoords = o::gather_vectors<4,3>(coords, elmVerts);
           auto ptclOrigin = makeVector3(pid, x_ps_orig);
@@ -445,7 +445,7 @@ namespace pumipic {
         } // for faces
         // if particle doesn't intersect any face, it
         // has reached the destination
-        ptcl_done[ptcl] = (lastExit[ptcl] == -1);
+        //ptcl_done[ptcl] = (lastExit[ptcl] == -1);
         if (lastExit[ptcl] == -1) { // to use in flux tally
           xPoints[3 * ptcl + 0] = x_ps_tgt(ptcl, 0);
           xPoints[3 * ptcl + 1] = x_ps_tgt(ptcl, 1);
