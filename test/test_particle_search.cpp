@@ -46,13 +46,18 @@ void apply_vacuum_boundary_condition(o::Mesh &mesh, PS *ptcls,
   const auto& side_is_exposed = o::mark_exposed_sides(&mesh);
 
   auto checkExposedEdges = PS_LAMBDA(const int e, const int pid, const int mask){
-    if (mask > 0 && !ptcl_done[pid]) {
-      assert(lastExit[pid]!=-1);
-      const o::LO bridge = lastExit[pid];
-      const bool exposed = side_is_exposed[bridge];
-      ptcl_done[pid] = exposed;
-      xFace[pid] = lastExit[pid];
-      elem_ids[pid] = exposed ? -1 : elem_ids[pid];
+    if (mask > 0 && !ptcl_done[pid]){
+        printf("lastExit[%d] = %d\n", pid, lastExit[pid]);
+        if (lastExit[pid] == -1) {
+            ptcl_done[pid] = 1;
+        } else {
+            assert(lastExit[pid] != -1);
+            const o::LO bridge = lastExit[pid];
+            const bool exposed = side_is_exposed[bridge];
+            ptcl_done[pid] = exposed;
+            xFace[pid] = lastExit[pid];
+            elem_ids[pid] = exposed ? -1 : elem_ids[pid];
+        }
     }
   };
   p::parallel_for(ptcls, checkExposedEdges, "apply vacumm boundary condition");
